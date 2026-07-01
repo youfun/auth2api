@@ -1,10 +1,12 @@
 import { Request } from "express";
+import { v4 as uuidv4 } from "uuid";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
 
 const BASE_URL = "https://chatgpt.com/backend-api";
 const RESPONSES_PATH = "/codex/responses";
+const RESPONSES_COMPACT_PATH = "/codex/responses/compact";
 
 const DEFAULT_ORIGINATOR = "codex_cli_rs";
 // Bumped from 0.40.0 — backend now version-gates `gpt-5.3-codex` and rejects
@@ -88,12 +90,56 @@ export function normalizeCodexResponsesBody(body: any): any {
   return next;
 }
 
+/**
+ * Codex compact uses a JSON-only subresource with a narrower request envelope
+ * than regular `/codex/responses`. Mirror the current Codex CLI/sub2api shape:
+ * keep model/input plus compact-relevant Responses fields, and drop
+ * request-scoped fields such as `stream`, `store`, and `prompt_cache_key`.
+ */
+export function normalizeCodexCompactBody(body: any): any {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const allowed = [
+    "model",
+    "input",
+    "instructions",
+    "tools",
+    "parallel_tool_calls",
+    "reasoning",
+    "text",
+    "previous_response_id",
+  ];
+  const next: any = {};
+  for (const key of allowed) {
+    if (body[key] !== undefined) next[key] = body[key];
+  }
+  return next;
+}
+
+function firstHeader(req: Request, name: string): string {
+  const value = req.headers[name.toLowerCase()];
+  if (Array.isArray(value)) return value[0] || "";
+  return typeof value === "string" ? value : "";
+}
+
+function compactSessionSeed(body: any, request: Request): string {
+  const sessionId = firstHeader(request, "session_id").trim();
+  if (sessionId) return sessionId;
+  const conversationId = firstHeader(request, "conversation_id").trim();
+  if (conversationId) return conversationId;
+  const promptCacheKey =
+    body && typeof body.prompt_cache_key === "string"
+      ? body.prompt_cache_key.trim()
+      : "";
+  return promptCacheKey || uuidv4();
+}
+
 export interface CallCodexResponsesOptions {
   body?: any;
   request: Request;
   account: AvailableAccount;
   config: Config;
   signal?: AbortSignal;
+  path?: typeof RESPONSES_PATH | typeof RESPONSES_COMPACT_PATH;
 }
 
 export async function callCodexResponses(
@@ -101,16 +147,27 @@ export async function callCodexResponses(
 ): Promise<Response> {
   const { request, account, config } = options;
   const body = options.body ?? request.body;
-  const stream = !!body.stream;
-  const url = `${BASE_URL}${RESPONSES_PATH}`;
+  const path = options.path ?? RESPONSES_PATH;
+  const isCompact = path === RESPONSES_COMPACT_PATH;
+  const stream = isCompact ? false : !!body.stream;
+  const url = `${BASE_URL}${path}`;
   const timeoutMs = stream
     ? config.timeouts["stream-messages-ms"]
     : config.timeouts["messages-ms"];
+  const headers = buildHeaders(account, stream, config);
+
+  if (isCompact) {
+    headers.Accept = "application/json";
+    const seed = compactSessionSeed(request.body ?? body, request);
+    headers.session_id = firstHeader(request, "session_id").trim() || seed;
+    headers.conversation_id =
+      firstHeader(request, "conversation_id").trim() || seed;
+  }
 
   try {
     return await fetch(url, {
       method: "POST",
-      headers: buildHeaders(account, stream, config),
+      headers,
       body: JSON.stringify(body),
       signal: withTimeoutSignal(timeoutMs, options.signal),
     });

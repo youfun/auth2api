@@ -4,6 +4,7 @@ import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import {
   createChatCompletionsHandler,
+  createResponsesCompactHandler,
   createResponsesHandler,
 } from "./handlers/openai";
 import {
@@ -246,8 +247,8 @@ export function createServer(
     });
   });
 
-  app.use("/v1", requireApiKey);
-  app.use("/v1", statsFinishMiddleware);
+  app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
+  app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
   app.get("/v1/models", async (_req, res) => {
     const created = Math.floor(Date.now() / 1000);
     const providers = registry.withAccounts();
@@ -269,6 +270,18 @@ export function createServer(
     createChatCompletionsHandler(config, registry),
   );
   app.post("/v1/responses", createResponsesHandler(config, registry));
+  app.post(
+    "/v1/responses/compact",
+    createResponsesCompactHandler(config, registry),
+  );
+  app.post(
+    "/codex/responses/compact",
+    createResponsesCompactHandler(config, registry),
+  );
+  app.post(
+    "/backend-api/codex/responses/compact",
+    createResponsesCompactHandler(config, registry),
+  );
 
   // Routes — Anthropic native passthrough
   app.post("/v1/messages", createMessagesHandler(config, registry));

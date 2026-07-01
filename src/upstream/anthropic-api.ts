@@ -8,6 +8,7 @@ import { extractApiKey, hashApiKey } from "../utils/common";
 
 const BASE_URL = "https://api.anthropic.com";
 const OAUTH_BETA = "oauth-2025-04-20";
+const COMPACT_BETA = "compact-2026-01-12";
 
 /**
  * Dynamic Anthropic-Beta construction — mirrors Claude Code's utils/betas.ts
@@ -29,6 +30,17 @@ function buildBetaHeader(model: string, structured: boolean): string {
   }
 
   return "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advanced-tool-use-2025-11-20,effort-2025-11-24";
+}
+
+function inferredBetasFromBody(body: any): string[] {
+  const edits = body?.context_management?.edits;
+  if (
+    Array.isArray(edits) &&
+    edits.some((edit: any) => edit?.type === "compact_20260112")
+  ) {
+    return [COMPACT_BETA];
+  }
+  return [];
 }
 
 /**
@@ -107,6 +119,7 @@ function buildHeaders(
   apiKeyHash?: string,
   structured?: boolean,
   extraHeaders?: Record<string, string>,
+  inferredBetas: string[] = [],
 ): Record<string, string> {
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
@@ -152,9 +165,15 @@ function buildHeaders(
     if (!betas.includes(OAUTH_BETA)) {
       betas.unshift(OAUTH_BETA);
     }
+    betas.push(...inferredBetas);
     headers["anthropic-beta"] = [...new Set(betas)].join(",");
   } else {
-    headers["anthropic-beta"] = buildBetaHeader(model, !!structured);
+    headers["anthropic-beta"] = [
+      ...new Set([
+        ...buildBetaHeader(model, !!structured).split(","),
+        ...inferredBetas,
+      ]),
+    ].join(",");
   }
 
   return headers;
@@ -213,6 +232,7 @@ export async function callAnthropicMessages(
     apiKeyHash,
     structured,
     extractPassthroughHeaders(request.headers),
+    inferredBetasFromBody(body),
   );
 
   const response = await fetch(url, {
@@ -248,6 +268,9 @@ export async function callAnthropicCountTokens(
     model,
     config.cloaking,
     apiKeyHash,
+    undefined,
+    extractPassthroughHeaders(request.headers),
+    inferredBetasFromBody(body),
   );
 
   const response = await fetch(url, {

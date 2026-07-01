@@ -411,13 +411,23 @@ test("loadConfig normalizes debug mode", () => {
 
 test("resolveModel maps aliases", () => {
   assert.equal(resolveModel("opus"), "claude-opus-4-7");
-  assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6");
+  assert.equal(resolveModel("sonnet"), "claude-sonnet-5");
   assert.equal(resolveModel("haiku"), "claude-haiku-4-5-20251001");
+  assert.equal(resolveModel("fable"), "claude-fable-5");
+  assert.equal(resolveModel("mythos"), "claude-mythos-preview");
 });
 
 test("resolveModel passes through unknown models", () => {
   assert.equal(resolveModel("gpt-4o"), "gpt-4o");
+  assert.equal(resolveModel("claude-sonnet-5"), "claude-sonnet-5");
+  assert.equal(resolveModel("claude-fable-5"), "claude-fable-5");
+  assert.equal(resolveModel("claude-mythos-preview"), "claude-mythos-preview");
+  assert.equal(
+    resolveModel("anthropic.claude-mythos-preview"),
+    "claude-mythos-preview",
+  );
   assert.equal(resolveModel("claude-sonnet-4-6"), "claude-sonnet-4-6");
+  assert.equal(resolveModel("claude-opus-4-8"), "claude-opus-4-8");
   assert.equal(resolveModel("claude-opus-4-7"), "claude-opus-4-7");
   assert.equal(resolveModel("claude-opus-4-6"), "claude-opus-4-6");
 });
@@ -432,7 +442,7 @@ test("openaiToAnthropic translates basic request", () => {
     messages: [{ role: "user", content: "hello" }],
     stream: false,
   });
-  assert.equal(result.model, "claude-sonnet-4-6");
+  assert.equal(result.model, "claude-sonnet-5");
   assert.equal(result.stream, false);
   assert.equal(result.max_tokens, 8192);
   assert.deepEqual(result.messages, [{ role: "user", content: "hello" }]);
@@ -590,6 +600,28 @@ test("openaiToAnthropic translates tool role messages", () => {
   assert.equal(result.messages[2].role, "user");
   assert.equal(result.messages[2].content[0].type, "tool_result");
   assert.equal(result.messages[2].content[0].tool_use_id, "call_1");
+});
+
+test("openaiToAnthropic tolerates malformed assistant tool arguments", () => {
+  const result = openaiToAnthropic({
+    model: "sonnet",
+    messages: [
+      {
+        role: "assistant",
+        tool_calls: [
+          {
+            id: "call_bad",
+            type: "function",
+            function: { name: "broken_args", arguments: "{not json" },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(result.messages[0].content[0].type, "tool_use");
+  assert.equal(result.messages[0].content[0].name, "broken_args");
+  assert.deepEqual(result.messages[0].content[0].input, {});
 });
 
 // ══════════════════════════════════════════════════
@@ -802,7 +834,7 @@ test("responsesToAnthropic translates basic request", () => {
     input: [{ role: "user", content: "hello" }],
     stream: false,
   });
-  assert.equal(result.model, "claude-sonnet-4-6");
+  assert.equal(result.model, "claude-sonnet-5");
   assert.equal(result.stream, false);
   assert.deepEqual(result.messages, [{ role: "user", content: "hello" }]);
 });

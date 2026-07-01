@@ -37,9 +37,17 @@ function formatResponsesUsage(
 
 const MODEL_ALIASES: Record<string, string> = {
   opus: "claude-opus-4-7",
-  sonnet: "claude-sonnet-4-6",
+  sonnet: "claude-sonnet-5",
   haiku: "claude-haiku-4-5-20251001",
+  fable: "claude-fable-5",
+  mythos: "claude-mythos-preview",
+  "claude-sonnet-5": "claude-sonnet-5",
+  "claude-fable-5": "claude-fable-5",
+  "claude-mythos-preview": "claude-mythos-preview",
+  "anthropic.claude-mythos-preview": "claude-mythos-preview",
+  "bedrock/anthropic.claude-mythos-preview": "claude-mythos-preview",
   "claude-opus-4-7": "claude-opus-4-7",
+  "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-6": "claude-opus-4-6",
   "claude-sonnet-4-6": "claude-sonnet-4-6",
   "claude-haiku-4-5": "claude-haiku-4-5-20251001",
@@ -115,6 +123,16 @@ function convertToolChoice(tc: any): any {
     return { type: "tool", name: tc.function.name };
   }
   return tc;
+}
+
+function parseToolArguments(args: unknown): any {
+  if (args && typeof args === "object") return args;
+  if (typeof args !== "string" || !args.trim()) return {};
+  try {
+    return JSON.parse(args);
+  } catch {
+    return {};
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -233,9 +251,7 @@ export function openaiToAnthropic(body: any): any {
           type: "tool_use",
           id: tc.id,
           name: tc.function?.name || "",
-          input: tc.function?.arguments
-            ? JSON.parse(tc.function.arguments)
-            : {},
+          input: parseToolArguments(tc.function?.arguments),
         });
       }
       messages.push({ role: "assistant", content });

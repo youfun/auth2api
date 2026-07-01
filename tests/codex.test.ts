@@ -69,8 +69,17 @@ test("providerForModel routes by model name", () => {
   try {
     const registry = buildRegistry(tmpDir);
     // Anthropic
+    assert.equal(registry.forModel("claude-sonnet-5").id, "anthropic");
+    assert.equal(registry.forModel("claude-fable-5").id, "anthropic");
+    assert.equal(registry.forModel("claude-mythos-preview").id, "anthropic");
+    assert.equal(
+      registry.forModel("anthropic.claude-mythos-preview").id,
+      "anthropic",
+    );
     assert.equal(registry.forModel("claude-sonnet-4-6").id, "anthropic");
     assert.equal(registry.forModel("sonnet").id, "anthropic");
+    assert.equal(registry.forModel("fable").id, "anthropic");
+    assert.equal(registry.forModel("mythos").id, "anthropic");
     assert.equal(registry.forModel("opus").id, "anthropic");
     assert.equal(registry.forModel("claude-opus-4-7").id, "anthropic");
     // Codex — gpt-5 family + o-series + codex- prefix
@@ -647,7 +656,10 @@ test("waitForCallback serves success HTML inline (no 302 to closed server)", asy
 // codex-api.normalizeCodexResponsesBody
 // ══════════════════════════════════════════════════
 
-import { normalizeCodexResponsesBody } from "../src/upstream/codex-api";
+import {
+  normalizeCodexCompactBody,
+  normalizeCodexResponsesBody,
+} from "../src/upstream/codex-api";
 
 test("normalizeCodexResponsesBody fills missing required fields", () => {
   const out = normalizeCodexResponsesBody({
@@ -684,6 +696,36 @@ test("normalizeCodexResponsesBody handles empty/non-object input safely", () => 
     normalizeCodexResponsesBody("not an object" as any),
     "not an object",
   );
+});
+
+test("normalizeCodexCompactBody keeps compact schema and drops request-scoped fields", () => {
+  const out = normalizeCodexCompactBody({
+    model: "gpt-5.5",
+    input: [{ role: "user", content: "compact me" }],
+    instructions: "compact",
+    tools: [{ type: "function", name: "shell" }],
+    parallel_tool_calls: true,
+    reasoning: { effort: "high" },
+    text: { verbosity: "low" },
+    previous_response_id: "resp_123",
+    stream: true,
+    store: true,
+    prompt_cache_key: "cache-key",
+    client_metadata: { source: "codex" },
+  });
+
+  assert.equal(out.model, "gpt-5.5");
+  assert.ok(Array.isArray(out.input));
+  assert.equal(out.instructions, "compact");
+  assert.ok(Array.isArray(out.tools));
+  assert.equal(out.parallel_tool_calls, true);
+  assert.equal(out.reasoning.effort, "high");
+  assert.equal(out.text.verbosity, "low");
+  assert.equal(out.previous_response_id, "resp_123");
+  assert.equal(out.stream, undefined);
+  assert.equal(out.store, undefined);
+  assert.equal(out.prompt_cache_key, undefined);
+  assert.equal(out.client_metadata, undefined);
 });
 
 // ══════════════════════════════════════════════════

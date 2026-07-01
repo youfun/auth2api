@@ -271,6 +271,10 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
   assert.equal(modelsResp.status, 200);
   assert.ok(Array.isArray(modelsResp.body.data));
   assert.ok(modelsResp.body.data.length > 0);
+  const modelIds = new Set(modelsResp.body.data.map((m: any) => m.id));
+  assert.ok(modelIds.has("claude-sonnet-5"));
+  assert.ok(modelIds.has("claude-fable-5"));
+  assert.ok(modelIds.has("claude-mythos-preview"));
 
   const adminResp = await requestJson({
     server,
@@ -1141,6 +1145,81 @@ test("claude-cli anthropic-beta passthrough deduplicates oauth beta", async (t) 
   assert.equal(resp.status, 200);
 });
 
+test("anthropic compact beta is inferred from context_management", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  let seenMessagesHeader = "";
+  let seenCountTokensHeader = "";
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    const headers = init?.headers as Record<string, string>;
+    const url = String(input);
+    if (url.endsWith("/v1/messages?beta=true")) {
+      seenMessagesHeader = headers["anthropic-beta"];
+      return new Response(
+        JSON.stringify({
+          id: "msg_1",
+          content: [
+            { type: "compaction", content: "summary" },
+            { type: "text", text: "ok" },
+          ],
+          stop_reason: "end_turn",
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            iterations: [{ type: "compaction", input_tokens: 1 }],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    assert.equal(
+      url,
+      "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
+    );
+    seenCountTokensHeader = headers["anthropic-beta"];
+    return new Response(JSON.stringify({ input_tokens: 42 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const compactBody = {
+    model: "claude-sonnet-4-6",
+    max_tokens: 50,
+    messages: [{ role: "user", content: "hi" }],
+    context_management: {
+      edits: [{ type: "compact_20260112" }],
+    },
+  };
+
+  const msgResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: compactBody,
+  });
+  assert.equal(msgResp.status, 200);
+  assert.match(seenMessagesHeader, /compact-2026-01-12/);
+
+  const countResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages/count_tokens",
+    headers: { Authorization: "Bearer test-key" },
+    body: compactBody,
+  });
+  assert.equal(countResp.status, 200);
+  assert.match(seenCountTokensHeader, /compact-2026-01-12/);
+});
+
 test("codex responses upstream errors are normalized to OpenAI error shape", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(
@@ -1798,6 +1877,100 @@ test("codex /v1/responses sanitises body, forces upstream stream:true, and aggre
   assert.match(streamResp.body, /event: response\.output_text\.delta/);
   assert.match(streamResp.body, /"delta":"pong"/);
   assert.match(streamResp.body, /event: response\.completed/);
+});
+
+test("codex responses compact proxies standalone compaction endpoint", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-compact@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const seenPaths: string[] = [];
+  let receivedUpstreamBody: any = null;
+  const compactPayload = {
+    id: "resp_compact_x",
+    object: "response.compaction",
+    created_at: 1764967971,
+    output: [
+      {
+        id: "cmp_001",
+        type: "compaction",
+        encrypted_content: "opaque",
+      },
+    ],
+    usage: {
+      input_tokens: 11,
+      input_tokens_details: { cached_tokens: 3 },
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 2 },
+      total_tokens: 16,
+    },
+  };
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses/compact",
+    );
+    assert.equal(headers.Accept, "application/json");
+    assert.equal(headers.session_id, "compact-seed");
+    assert.equal(headers.conversation_id, "compact-seed");
+    receivedUpstreamBody = JSON.parse(String(init?.body || "{}"));
+    return new Response(JSON.stringify(compactPayload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  for (const pathName of [
+    "/v1/responses/compact",
+    "/backend-api/codex/responses/compact",
+  ]) {
+    seenPaths.push(pathName);
+    const resp = await requestJson({
+      server,
+      method: "POST",
+      path: pathName,
+      headers: { Authorization: "Bearer test-key" },
+      body: {
+        model: "gpt-5.5",
+        input: [
+          { role: "user", content: [{ type: "input_text", text: "ping" }] },
+        ],
+        instructions: "compact this",
+        stream: true,
+        store: true,
+        prompt_cache_key: "compact-seed",
+        client_metadata: { source: "codex" },
+      },
+    });
+
+    assert.equal(resp.status, 200);
+    assert.equal(resp.body.object, "response.compaction");
+    assert.equal(resp.body.output[0].type, "compaction");
+    assert.equal(receivedUpstreamBody.instructions, "compact this");
+    assert.equal(receivedUpstreamBody.stream, undefined);
+    assert.equal(receivedUpstreamBody.store, undefined);
+    assert.equal(receivedUpstreamBody.prompt_cache_key, undefined);
+    assert.equal(receivedUpstreamBody.client_metadata, undefined);
+  }
+
+  assert.deepEqual(seenPaths, [
+    "/v1/responses/compact",
+    "/backend-api/codex/responses/compact",
+  ]);
 });
 
 test("codex /v1/chat/completions non-stream still captures final SSE event when upstream omits trailing newline", async (t) => {

@@ -16,7 +16,11 @@ import {
   anthropicSSEToResponses,
 } from "../upstream/translator";
 import { handleStreamingResponse, readSseEvents } from "../upstream/streaming";
-import { normalizeCodexResponsesBody } from "../upstream/codex-api";
+import {
+  callCodexResponses,
+  normalizeCodexCompactBody,
+  normalizeCodexResponsesBody,
+} from "../upstream/codex-api";
 import { normalizeCursorResponsesBody } from "../upstream/cursor-api";
 import {
   chatToResponsesRequest,
@@ -731,6 +735,96 @@ export function createResponsesHandler(
       });
     } catch (err: any) {
       console.error("Responses handler error:", err.message);
+      internalError(resp);
+    }
+  };
+}
+
+// POST /v1/responses/compact — OpenAI Responses standalone compaction.
+// Codex's ChatGPT-account backend exposes the same operation at
+// /backend-api/codex/responses/compact, so this handler is also used by
+// backend-compatible aliases in server.ts.
+export function createResponsesCompactHandler(
+  config: Config,
+  registry: ProviderRegistry,
+) {
+  return async (req: Request, resp: ExpressResponse): Promise<void> => {
+    try {
+      const body = req.body || {};
+      const model = resolveModel(body.model || "gpt-5-codex");
+      const provider = registry.forModel(model);
+      tagStatsModel(resp, model, provider.id);
+
+      if (provider.id !== "codex") {
+        resp.status(400).json({
+          error: {
+            message: `responses/compact is only supported for the codex provider, got ${provider.id}`,
+            type: "unsupported_endpoint",
+          },
+        });
+        return;
+      }
+
+      const compactBody = normalizeCodexCompactBody(body);
+
+      if (isDebugLevel(config.debug, "verbose")) {
+        console.log("[DEBUG] Forwarding /responses/compact body for codex:");
+        console.log(JSON.stringify(compactBody, null, 2));
+      }
+
+      await proxyWithRetry("ResponsesCompact(codex)", resp, config, {
+        manager: provider.manager,
+        upstream: (account, signal) =>
+          callCodexResponses({
+            body: compactBody,
+            request: req,
+            account,
+            config,
+            signal,
+            path: "/codex/responses/compact",
+          }),
+        success: async (upstream, account) => {
+          let usage: any = null;
+          let streamUsage: any = null;
+          const contentType = upstream.headers.get("content-type") || "";
+
+          if (contentType.includes("text/event-stream")) {
+            const result = await handleStreamingResponse(upstream, resp);
+            streamUsage = result.usage;
+          } else {
+            const text = await upstream.text();
+            try {
+              usage = JSON.parse(text)?.usage ?? null;
+            } catch {
+              /* best-effort stats only */
+            }
+            if (contentType) resp.setHeader("Content-Type", contentType);
+            resp.status(upstream.status).send(text);
+          }
+
+          const codexCompactUsage = {
+            inputTokens: usage?.input_tokens || streamUsage?.inputTokens || 0,
+            outputTokens: usage?.output_tokens || streamUsage?.outputTokens || 0,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens:
+              usage?.input_tokens_details?.cached_tokens ||
+              streamUsage?.cacheReadInputTokens ||
+              0,
+            reasoningOutputTokens:
+              usage?.output_tokens_details?.reasoning_tokens ||
+              streamUsage?.reasoningOutputTokens ||
+              0,
+          };
+          provider.manager.recordSuccess(
+            account.token.email,
+            codexCompactUsage,
+          );
+          tagStatsUsage(resp, codexCompactUsage);
+        },
+        errorAdapter: openaiErrorBody,
+      });
+    } catch (err: any) {
+      console.error("Responses compact error:", err.message);
       internalError(resp);
     }
   };
